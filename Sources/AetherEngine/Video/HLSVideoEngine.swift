@@ -857,6 +857,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// what actually replaces the segments and the item holding them.
     public var audioDelaySeconds: Double = 0
 
+    /// Reel patch P-006: `LoadOptions.audioEffects`. While any effect is on, every audio codec goes
+    /// through a bridge (PCM is where the effects run), including the ones that would stream-copy.
+    /// Read once by `start()`; a change is a new session. Set before `start()`.
+    var audioEffects: AudioEffects = .off
+
     /// `LoadOptions.progressiveSegmentDelivery`, handed to the provider and to every producer this
     /// session builds. Set before `start()`.
     var servesSegmentsProgressively = false
@@ -966,6 +971,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// latency on a 24 fps 1440p LAN source and stays within the spec's 2-6 s range.
     static let targetSegmentDuration: Double = 4.0
 
+    /// Reel patch P-005: this session's keyframe-aligned VOD cut target (`LoadOptions.vodSegmentTargetSeconds`).
+    let vodCutTarget: Double
+
     /// Live cut target under `LiveJoinProfile.fastZap` (AE#195): cut at every keyframe past 0.5 s, so
     /// segments quantize to the source GOP and the served TARGETDURATION (whose 3 x holdback gates the
     /// first live manifest, AE#189) is driven by `ceil(max EXTINF)` instead of the
@@ -1068,8 +1076,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
         sequentialOrigin: Bool = false,
         heldSourceConnection: Bool = false,
         declaredDurationSeconds: Double? = nil,
-        forwardBufferSegments: Int? = nil
+        forwardBufferSegments: Int? = nil,
+        vodSegmentTargetSeconds: Double? = nil
     ) {
+        self.vodCutTarget = vodSegmentTargetSeconds.map { Swift.min(6, Swift.max(2, $0)) } ?? Self.targetSegmentDuration
         self.sourceURL = url
         self.requestHeaders = RequestHeaderStore(sourceHTTPHeaders)
         self.sequentialOrigin = sequentialOrigin
@@ -1469,7 +1479,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 plan = Self.buildKeyframeSegmentPlan(
                     keyframes: keyframes,
                     videoTimeBase: videoTimeBase,
-                    sourceDurationSeconds: durationSeconds
+                    sourceDurationSeconds: durationSeconds,
+                    target: vodCutTarget
                 )
                 planBoundariesClaimRandomAccess = true
                 keyframeBytePositions = Dictionary(keyframeEntries.map { ($0.pts, $0.pos) },
@@ -1973,6 +1984,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     "[HLSVideoEngine] audio: FLAC STREAMINFO min_blocksize=\(sizes?.min ?? 0) "
                     + "max_blocksize=\(sizes?.max ?? 0) is below CoreMedia's floor of "
                     + "\(FLACStreamInfo.coreMediaMinimumBlockSize), bridging instead of stream-copy",
+                    category: .session
+                )
+            } else if audioEffects.isActive, !compat.requiresBridge, !isHEAAC, compat != .unsupported {
+                // P-006: a stream copy hands AVPlayer the source's own bitstream and the engine never
+                // sees a sample, so the effects need the decode the bridge does anyway.
+                bridgePreferred = true
+                EngineLog.emit(
+                    "[HLSVideoEngine] audio: codec=\(compat) bridged instead of stream-copied for audio effects "
+                    + "(\(audioEffects))"
+                    + (compat == .eac3 && acpForHE.profile == 30
+                       ? "; the E-AC-3 Atmos objects (JOC) do not survive the decode, the 5.1 bed plays"
+                       : ""),
                     category: .session
                 )
             } else if compat.requiresBridge || isHEAAC {

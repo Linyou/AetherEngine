@@ -44,6 +44,18 @@ struct PeakLimiter {
         }
     }
 
+    /// Reel patch P-006: the gain for one frame whose loudest sample is `peak`, for a caller whose
+    /// samples are not in planes (interleaved PCM, `AudioEffectsProcessor`). Same envelope and the
+    /// same accounting as `process`, so either entry keeps every sample under the threshold.
+    mutating func gain(forFramePeak peak: Float) -> Float {
+        envelope = max(peak, envelope * releaseCoefficient)
+        guard envelope > Self.threshold else { return 1 }
+        let gain = Self.threshold / envelope
+        limitedFrames += 1
+        deepestGain = min(deepestGain, gain)
+        return gain
+    }
+
     /// Forget the envelope (a seek or restart: the next audio has nothing to do with the last).
     mutating func reset() {
         envelope = 0

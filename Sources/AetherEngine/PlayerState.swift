@@ -898,6 +898,25 @@ public struct LoadOptions: Sendable, Equatable {
     /// `nativeRemoteHLS` and on the software path, which serve no loopback segments.
     public var progressiveSegmentDelivery: Bool = false
 
+    /// Reel patch P-004: run the #151 subtitle forward prefetch, a second, subtitle-only reader that
+    /// keeps cues `subtitleDrainLeadSeconds` plus a margin (75 s) ahead of the playhead. On Matroska
+    /// that reader is a second full copy of the stream, read from another position at the same time:
+    /// it doubles the bytes on the link and, against a server with a spinning disk, makes the disk
+    /// seek between two positions, which can take the video read down to a fraction of its rate.
+    /// A host whose producer window already reaches past that lead (`forwardBufferSegments` × 4 s
+    /// ≥ 75 s) gets the same cues from the pump's own harvest and can turn it off. OCR'd bitmap
+    /// subtitles, which need a longer window, still start it. Default `true` (upstream behaviour).
+    public var subtitleForwardPrefetch: Bool = true
+
+    /// Reel patch P-005: the cut target for keyframe-aligned VOD segments, in seconds (nil keeps
+    /// `HLSVideoEngine.targetSegmentDuration`, 4 s). AVPlayer holds back playback until it has about
+    /// one and a half segments, so after a seek or at startup it waits for six seconds of video at
+    /// 4 s; at 2 s it waits for three, which on a high-bitrate remux over a link with little
+    /// headroom is the difference between a 3 s and a 6 s seek. Segments still end on keyframes,
+    /// so a source with long GOPs keeps its own spacing. Ignored for live, for source-declared
+    /// boundaries and for the uniform-stride fallback. Clamped to 2...6 s (Apple's HLS range).
+    public var vodSegmentTargetSeconds: Double? = nil
+
     /// Autostart at load completion. Default `true`: every load path ends in `host.play()` and a
     /// `.playing` state (current behavior, byte-identical). Set `false` to mount PAUSED: a host that
     /// holds a pause at mount (synchronized-start lobby that loads several devices and starts them on
@@ -918,6 +937,15 @@ public struct LoadOptions: Sendable, Equatable {
     /// Clamped to `AudioDelayPolicy.maxAbsSeconds`. Correct it mid-session with
     /// `AetherEngine.setAudioDelay(_:)`, which is the same value seen from the other end.
     public var audioDelaySeconds: Double = 0
+
+    /// Reel patch P-006: night mode, dialogue boost and volume boost (`AudioEffects`). Default `.off`,
+    /// which changes nothing on any route. While any effect is on, a `.loopback` session decodes and
+    /// re-encodes audio it would otherwise stream-copy (AAC, AC-3, E-AC-3, FLAC, ALAC), so **Dolby
+    /// Atmos carried in E-AC-3 (JOC) plays as its 5.1 bed**, and an audio-only session plays through
+    /// FFmpeg instead of AVPlayer. `.remoteBypass` cannot apply them. Change it mid-session with
+    /// `AetherEngine.setAudioEffects(_:)`, live on `.software` and FFmpeg audio-only sessions, through a
+    /// session-preserving reload on `.loopback`; `reloadAtCurrentPosition(applying:)` carries it too.
+    public var audioEffects: AudioEffects = .off
 
     /// Teletext caption page for `dvb_teletext` subtitle decode. nil (default) = libzvbi auto-detect
     /// (`txt_page=subtitle`); an explicit page (e.g. 801 for AU) targets channels whose caption page

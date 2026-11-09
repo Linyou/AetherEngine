@@ -288,6 +288,8 @@ extension HLSVideoEngine {
                     )
                 }
             }
+        } else if preferBridge && sourceIsAtmos && audioEffects.isActive {
+            // P-006: the host's audio effects asked for PCM, and the routing decision already said so.
         } else if preferBridge && sourceIsAtmos {
             // EAC3+JOC always stream-copies; a pre-bridge decision is a codec-table bug.
             EngineLog.emit(
@@ -330,7 +332,8 @@ extension HLSVideoEngine {
                         mode: audioBridgeMode,
                         // The first attempt lets the bridge resolve, so a container that under-reports its
                         // channel count still gets the decoder-resolved answer; only the retry is forced.
-                        forcedEncoder: attemptIndex == 0 ? nil : encoderAttempt
+                        forcedEncoder: attemptIndex == 0 ? nil : encoderAttempt,
+                        audioEffects: audioEffects
                     )
                 } catch AudioBridge.AudioBridgeError.encoderNotFound(let missing) where !isLastAttempt {
                     EngineLog.emit(

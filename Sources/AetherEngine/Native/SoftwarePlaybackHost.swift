@@ -243,6 +243,21 @@ final class SoftwarePlaybackHost {
     }
     nonisolated(unsafe) private var _pausedBeforeFirstFrame = false
 
+    /// Reel patch P-007: a frame step is waiting for the frame it will show, so the loops read and
+    /// decode under the paused transport until that frame is handed to the layer, the way they do for
+    /// a first frame paused before it arrived. The clock stays stopped throughout: the arming rate and
+    /// the rebuffer release both read this as a pause (`armingRate`).
+    nonisolated private var stepPresentPending: Bool {
+        get { flagsLock.lock(); defer { flagsLock.unlock() }; return _stepPresentPending }
+        set {
+            flagsLock.lock(); _stepPresentPending = newValue; flagsLock.unlock()
+            demuxCondition.lock()
+            demuxCondition.broadcast()
+            demuxCondition.unlock()
+        }
+    }
+    nonisolated(unsafe) private var _stepPresentPending = false
+
     /// Clears the flag and says whether it was set, in one step, so the first frame and a `play()` cannot
     /// both act on it.
     nonisolated private func takePausedBeforeFirstFrame() -> Bool {
@@ -268,6 +283,10 @@ final class SoftwarePlaybackHost {
     /// well as on the decoder so a decoder opened later in the session (an audio-track switch, a
     /// rebuild) starts out carrying it rather than at zero.
     private(set) var audioDelaySeconds: Double = 0
+
+    /// Reel patch P-006: the audio effects, kept here as well as on the decoder for the same reason
+    /// as `audioDelaySeconds`: a decoder opened later in the session starts out carrying them.
+    private(set) var audioEffects: AudioEffects = .off
 
     /// AE#462: how this host delivers audio, as a typed fact for the engine's published
     /// `audioDelivery`. Set once the audio decoder has been given its chance.
@@ -1219,6 +1238,7 @@ final class SoftwarePlaybackHost {
                         NSLocalizedDescriptionKey: "audio pipeline forced to fail (TEST-ONLY)"])
                 }
                 try aDec.open(stream: aStream)
+                aDec.setAudioEffects(audioEffects)   // P-006
                 self.audioDecoder = aDec
                 self.audioStreamIndex = resolvedAudioIdx
                 let atb = aStream.pointee.time_base
@@ -1683,6 +1703,14 @@ final class SoftwarePlaybackHost {
         audioOutput?.setPresentationOffset(seconds: seconds)
     }
 
+    /// Reel patch P-006: set the audio effects. Like `setAudioDelay`, only what is decoded from here
+    /// on carries them; up to `AudioLookaheadPolicy.targetLeadSeconds` already in the renderer keeps
+    /// the previous value until something flushes it, which `AetherEngine.setAudioEffects` does.
+    func setAudioEffects(_ effects: AudioEffects) {
+        audioEffects = effects
+        audioDecoder?.setAudioEffects(effects)
+    }
+
     func setResumeRate(_ rate: Float) {
         guard rate != 0 else { return }
         lastRate = rate
@@ -1851,6 +1879,99 @@ final class SoftwarePlaybackHost {
         noteSeekSettled(generation)
         if let cacheGeneration { packetSource?.endSeek(cacheGeneration, sourceClock: sourceSeconds) }
         return outcome
+    }
+
+    // MARK: - Frame stepping (Reel patch P-007)
+
+    /// How long a seek-based step waits for its frame before giving up: the decoder runs from the
+    /// keyframe before it, which on a long-GOP 4K source is a few seconds of decode.
+    static let stepFrameDeadlineSeconds: Double = 10
+
+    /// Whether this session can step: a VOD source whose clock is anchored and which has shown a
+    /// picture. Live is out: there is no going back on a live-only source, and the DVR feeder paces on
+    /// a ring this does not drive.
+    var canStepFrames: Bool {
+        !isLive && clockArmed && audioOutput != nil && failure == nil && !stopRequested
+            && !seekInFlight && demuxLoopStarted && framesEnqueued > 0
+    }
+
+    /// The frame on screen, on the source axis, or the clock when no frame is known.
+    func displayedFrameSourceSeconds() -> Double? {
+        guard let aOut = audioOutput else { return nil }
+        let clock = aOut.currentTimeSeconds
+        return FrameStep.displayedFrame(presentations: renderer.handedOverPresentationTimes(), clock: clock)
+            ?? clock
+    }
+
+    /// The interval of the frames this session presents, measured off the layer's own frames.
+    var presentedFrameDuration: Double? {
+        FrameStep.measuredFrameDuration(presentations: renderer.handedOverPresentationTimes())
+    }
+
+    /// The raw clock, source axis (`sourceClockSeconds` is its 4 Hz publication).
+    var clockSourceSeconds: Double? { audioOutput?.currentTimeSeconds }
+
+    /// Show the `count`th frame after the one on screen by parking the stopped clock on it, when the
+    /// layer already holds that frame (a paused session holds a few past the clock). False when it
+    /// does not, or the session cannot step: the caller then steps with an accurate seek, because a
+    /// display layer under a stopped clock stops taking frames once its queue is full, so decoding
+    /// further ahead without flushing it cannot be relied on.
+    func presentHeldFrame(forwardBy count: Int) -> Bool {
+        guard count > 0, canStepFrames, !isPlaying, let aOut = audioOutput,
+              let target = FrameStep.forwardTarget(presentations: renderer.handedOverPresentationTimes(),
+                                                   clock: aOut.currentTimeSeconds, count: count)
+        else { return false }
+        presentStoppedClock(at: target, on: aOut)
+        return true
+    }
+
+    /// After a paused seek to `threshold` (source axis), show the first frame at or after it. A
+    /// paused seek otherwise anchors the clock and leaves the pre-seek picture up until play, since
+    /// the loops do not decode under a pause; here they decode until that frame is in the layer.
+    func presentFrameAfterSeek(atOrAfter threshold: Double) async -> Bool {
+        guard canStepFrames, !isPlaying, let aOut = audioOutput else { return false }
+        guard let target = await awaitHandedOverFrame({
+            FrameStep.firstFrame(atOrAfter: threshold, presentations: $0)
+        }) else { return false }
+        presentStoppedClock(at: target, on: aOut)
+        return true
+    }
+
+    /// Wait until `pick` finds its frame among those handed to the layer, letting the loops decode
+    /// under the pause meanwhile. Nil when a seek, a play or a stop takes over, or at the deadline.
+    private func awaitHandedOverFrame(_ pick: ([Double]) -> Double?) async -> Double? {
+        if let hit = pick(renderer.handedOverPresentationTimes()) { return hit }
+        let generation = seekGeneration
+        stepPresentPending = true
+        defer { stepPresentPending = false }
+        let deadline = ContinuousClock.now + .seconds(Self.stepFrameDeadlineSeconds)
+        while ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(8))
+            guard !stopRequested, failure == nil, !isPlaying, seekGeneration == generation else { return nil }
+            if let hit = pick(renderer.handedOverPresentationTimes()) { return hit }
+            if didReachEnd {
+                // The loop drains the reorder buffer at end of media; whatever is in the layer now is all.
+                return pick(renderer.handedOverPresentationTimes())
+            }
+        }
+        EngineLog.emit("[SWHost] P-007 frame step: no frame within \(Self.stepFrameDeadlineSeconds)s",
+                       category: .swPlayback)
+        return nil
+    }
+
+    /// Park the stopped clock on a frame and publish it at once rather than on the next 4 Hz tick.
+    private func presentStoppedClock(at source: Double, on aOut: AudioOutput) {
+        aOut.seekClock(to: CMTime(seconds: source + FrameStep.presentationPad, preferredTimescale: 1_000_000_000),
+                       rate: 0)
+        pausedByHost = true
+        // Read back off the parked clock, which is what the 4 Hz tick publishes too, so the two agree.
+        let readBack = aOut.currentTimeSeconds
+        let parked = abs(readBack - source) < FrameStep.sameFrameTolerance ? readBack : source + FrameStep.presentationPad
+        sourceClockSeconds = parked
+        let zero = clockSessionZero
+        currentTime = zero > 0 ? max(0, parked - zero) : parked
+        EngineLog.emit("[SWHost] P-007 frame step: presenting \(String(format: "%.4f", source))s",
+                       category: .swPlayback)
     }
 
     /// AE#595: the extractor, built on the first ask and kept for the rest of the session.
@@ -2142,7 +2263,8 @@ final class SoftwarePlaybackHost {
         let currentRate: @Sendable () -> Float = { [weak self] in
             guard let self else { return 1.0 }
             return PausedFirstFrame.armingRate(lastRate: self.lastRate,
-                                               pausedBeforeFirstFrame: self.pausedBeforeFirstFrame)
+                                               pausedBeforeFirstFrame: self.pausedBeforeFirstFrame
+                                                   || self.stepPresentPending)
         }
         let ring = dvrRing
         let vTbSec = videoTimeBaseSeconds
@@ -2162,7 +2284,8 @@ final class SoftwarePlaybackHost {
         let getIsPlaying: @Sendable () -> Bool = { [weak self] in
             guard let self else { return false }
             return PausedFirstFrame.loopsMayRun(isPlaying: self.isPlaying,
-                                                pausedBeforeFirstFrame: self.pausedBeforeFirstFrame)
+                                                pausedBeforeFirstFrame: self.pausedBeforeFirstFrame
+                                                    || self.stepPresentPending)
         }
         let getStopRequested: @Sendable () -> Bool = { [weak self] in self?.stopRequested ?? true }
         // #95: resolved per packet so a tap installed mid-session is picked up by running loops.

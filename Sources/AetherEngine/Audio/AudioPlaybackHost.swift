@@ -26,6 +26,8 @@ final class AudioPlaybackHost {
     // MARK: - Internals
 
     private var audioDecoder: AudioDecoder?
+    /// Reel patch P-006: carried here so the decoder `load` opens starts out with it.
+    private(set) var audioEffects: AudioEffects = .off
     private var audioOutput: AudioOutput?
     private var demuxer: Demuxer?
 
@@ -178,6 +180,7 @@ final class AudioPlaybackHost {
 
         let aDec = AudioDecoder()
         try aDec.open(stream: aStream)
+        aDec.setAudioEffects(audioEffects)   // P-006
         self.audioDecoder = aDec
         self.audioStreamIndex = resolvedAudioIdx
         self.audioOutput = AudioOutput()
@@ -258,6 +261,13 @@ final class AudioPlaybackHost {
     var sessionZeroForTesting: Double { sessionZeroSeconds }
     var outputVolumeForTesting: Float? { audioOutput?.volume }
     #endif
+
+    /// Reel patch P-006: the decoder takes the new effects on its next buffer; what the renderer
+    /// already holds plays out unless the caller re-anchors (`AetherEngine.setAudioEffects` does).
+    func setAudioEffects(_ effects: AudioEffects) {
+        audioEffects = effects
+        audioDecoder?.setAudioEffects(effects)
+    }
 
     func pause() {
         audioOutput?.pause()

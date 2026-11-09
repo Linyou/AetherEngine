@@ -714,6 +714,12 @@ extension AetherEngine {
         let lead = subtitleOCRArmedOrdinal != nil
             ? Self.subtitleOCRPrefetchLeadSeconds
             : Self.subtitleDrainLeadSeconds + Self.subtitleForwardPrefetchLeadMarginSeconds
+        // Reel patch P-004: the host's producer window covers the lead, so the pump's harvest holds
+        // the cues and a second full read of the source would only compete with the video read.
+        if !loadedOptions.subtitleForwardPrefetch, subtitleOCRArmedOrdinal == nil {
+            if subtitleForwardPrefetchTask != nil { cancelSubtitleForwardPrefetcher(reason: .prefetchDisabledByHost) }
+            return
+        }
         // #240: a live session moves its own cursor. Only a changed lead still needs a rebuild
         // (the loop captures it at start), and only a live task can be handed the request at all.
         if let reanchor = subtitleForwardPrefetchReanchor,

@@ -33,4 +33,7 @@ enum SubtitleDrainStopReason: String, Sendable {
     /// `startSubtitleForwardPrefetcher` is replacing a running session with a new one (a changed
     /// lead, or a jump the in-place re-anchor cannot serve). The one reason that is not a loss.
     case prefetchRebuild
+    /// Reel patch P-004: the host turned the prefetch off (`LoadOptions.subtitleForwardPrefetch`);
+    /// the pump's harvest covers the lead.
+    case prefetchDisabledByHost
 }

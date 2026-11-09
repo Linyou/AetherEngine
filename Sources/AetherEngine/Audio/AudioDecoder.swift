@@ -51,6 +51,15 @@ final class AudioDecoder: @unchecked Sendable {
     private(set) var sampleRate: Int32 = 0
     private(set) var channels: Int32 = 0
 
+    /// Reel patch P-006: the effects every emitted buffer carries. Applied in `emitPending`, on the
+    /// coalesced interleaved Float32 just before it becomes a sample buffer, so one pass covers the
+    /// renderer and the audio tap alike. Guarded by `stateLock`, like the contexts.
+    private var effects: AudioEffects = .off
+    /// Built for the resampler's output (rate and channel order) once both are known; rebuilt when a
+    /// mid-stream format change gives the PCM another shape.
+    private var effectsProcessor: AudioEffectsProcessor?
+    private var effectsRoles = AudioEffectsProcessor.ChannelRoles(channelCount: 0, centre: nil)
+
     func open(stream: UnsafeMutablePointer<AVStream>) throws {
         guard let codecpar = stream.pointee.codecpar else {
             throw AudioDecoderError.noCodecParameters
@@ -195,16 +204,35 @@ final class AudioDecoder: @unchecked Sendable {
         // What this context was built for; every later frame is compared against it (#452).
         configuredInput.adopt(layout: &inLayout, format: inFmt, rate: inRate)
 
+        // P-006: the effects run on this context's OUTPUT, so they follow its rate and order.
+        let roles = AudioEffectsProcessor.ChannelRoles(layout: &outLayout)
+        if effectsProcessor?.sampleRate != Int(sampleRate) || effectsRoles != roles {
+            effectsProcessor = nil
+        }
+        effectsRoles = roles
+
         #if DEBUG
         EngineLog.emit("[AudioDecoder] Resampler ready: \(sampleRate)Hz, \(channels)ch, inFmt=\(inFmt.rawValue)", category: .swPlayback)
         #endif
         return true
     }
 
+    /// Reel patch P-006: set the effects for every buffer emitted from here on. Buffers already
+    /// handed out keep what they were made with; a caller that wants the change at the playhead
+    /// re-anchors (`AetherEngine.setAudioEffects`).
+    func setAudioEffects(_ newEffects: AudioEffects) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        effects = newEffects
+        effectsProcessor?.update(effects: newEffects)
+    }
+
     /// Flush the decoder (call at EOF or seek).
     func flush() {
         stateLock.lock()
         defer { stateLock.unlock() }
+        // The compressor and limiter envelopes describe audio that is gone after a seek.
+        effectsProcessor?.reset()
         guard let ctx = codecContext else { return }
         avcodec_flush_buffers(ctx)
         // Drop the coalesced samples; after a seek they'd be at the wrong PTS anyway.
@@ -373,6 +401,8 @@ final class AudioDecoder: @unchecked Sendable {
         let totalSamples = pendingSampleCount
         let startPTS = pendingStartPTS
 
+        if effects.isActive { applyEffectsToPending(frameCount: totalSamples) }
+
         var blockBuffer: CMBlockBuffer?
         var status = CMBlockBufferCreateWithMemoryBlock(
             allocator: kCFAllocatorDefault,
@@ -438,6 +468,21 @@ final class AudioDecoder: @unchecked Sendable {
         guard status == noErr, let sample = sampleBuffer else { return nil }
         clock.commit(pts: outPTS, reanchor: reanchor, sampleCount: totalSamples)
         return sample
+    }
+
+    /// P-006: run the effects over the accumulator in place. `pendingBytes` is this decoder's alone,
+    /// so the mutable view is the buffer itself, not a copy.
+    private func applyEffectsToPending(frameCount: Int) {
+        guard effectsRoles.channelCount == Int(channels), channels > 0,
+              pendingBytes.count >= frameCount * Int(channels) * MemoryLayout<Float>.size else { return }
+        if effectsProcessor == nil {
+            effectsProcessor = AudioEffectsProcessor(
+                effects: effects, sampleRate: Int(sampleRate), roles: effectsRoles)
+        }
+        pendingBytes.withUnsafeMutableBytes { raw in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: Float.self) else { return }
+            effectsProcessor?.process(interleaved: base, frameCount: frameCount)
+        }
     }
 
     private func resetPending() {

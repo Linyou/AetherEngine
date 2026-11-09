@@ -340,7 +340,8 @@ extension HLSVideoEngine {
                 #endif
             }
             bridge = try SpatialAudioBridge(
-                srcTimeBase: audioStream.pointee.time_base, layout: layout, decoder: decoder)
+                srcTimeBase: audioStream.pointee.time_base, layout: layout, decoder: decoder,
+                audioEffects: audioEffects)
         } catch {
             EngineLog.emit(
                 "[HLSVideoEngine] ERROR: \(source.name) rendering unavailable (\(error)); keeping the channel bridge",

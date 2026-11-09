@@ -54,6 +54,9 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     private var levelMeter: BedLevelMeter
     /// Keeps the bed under full scale, since the encoder carries anything over it on (see `PeakLimiter`).
     private var limiter: PeakLimiter
+    /// Reel patch P-006: `LoadOptions.audioEffects` on the rendered bed, before the limiter. Nil when
+    /// every effect is off.
+    private var effectsProcessor: AudioEffectsProcessor?
 
     /// Rendered bed awaiting the encoder. TrueHD decodes one 40-frame access unit per block, 1200
     /// a second; feeding the converter that often costs more in call overhead than the encode, so
@@ -131,13 +134,20 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         srcTimeBase: AVRational,
         layout: SpatialSpeakerLayout,
         decoder: ObjectAudioDecoding,
-        bitRate: Int? = nil
+        bitRate: Int? = nil,
+        audioEffects: AudioEffects = .off
     ) throws {
         self.srcTimeBase = srcTimeBase
         self.layout = layout
         self.decoder = decoder
         levelMeter = BedLevelMeter(layout: layout, sampleRate: Self.sampleRate)
         limiter = PeakLimiter(sampleRate: Self.sampleRate)
+        if audioEffects.isActive {
+            effectsProcessor = AudioEffectsProcessor(
+                effects: audioEffects, sampleRate: Self.sampleRate,
+                roles: .init(channelCount: layout.channelCount,
+                             centre: layout.speakers.firstIndex(of: .center)))
+        }
         let rate = bitRate ?? layout.channelCount * Self.bitRatePerChannel
         peakOutputBitRate = Int64(rate)
         let encoder = try APACEncoder(layout: layout, sampleRate: Double(Self.sampleRate), bitRate: rate)
@@ -323,6 +333,7 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
 #endif
         pipeline.reset()
         limiter.reset()
+        effectsProcessor?.reset()
         logLevels(levelMeter.restart())
         pendingFrames = 0
         originFrame = nil
@@ -474,6 +485,7 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         encodePending()
         pipeline.restart()
         limiter.reset()
+        effectsProcessor?.reset()
         encoderStartFrame = target
         encoderFramesIn = 0
         EngineLog.emit(
@@ -525,6 +537,7 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         let frames = pendingFrames
         pendingFrames = 0
         guard let start = encoderStartFrame else { return }
+        effectsProcessor?.process(planes: output.planes, frameCount: frames)
         limiter.process(output.planes, frameCount: frames)
         let position = start + encoderFramesIn
         // Where this chunk plays, for the level line: the anchor is a source PTS in 48 kHz frames.

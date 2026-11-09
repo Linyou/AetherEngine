@@ -442,6 +442,9 @@ enum SessionOptionCorrection {
     /// omission. A new field is correctable by default (it falls through `refusedFields`), which is
     /// right for a tuning lever and wrong for an identity one, so the choice has to be made
     /// deliberately. Update this list and, if the field names the session, `loadIdentityFields`.
+    ///
+    /// Reel patches P-004, P-005 and P-006 add `subtitleForwardPrefetch`, `vodSegmentTargetSeconds`
+    /// and `audioEffects`, all tuning levers, so all correctable.
     static let knownFields: [String] = [
         "omitCriteriaColorExtensions", "suppressDisplayCriteria", "displayCriteriaOwner", "httpHeaders", "nativeVideoFrameDiagnostics", "nativeVideoFrameRecovery", "hostRetriesExhaustedLiveReplay",
         "keepDvh1TagWithoutDV", "forceDolbyVisionOnNonDVDisplay", "dolbyVisionHandling", "preferDualLayerDolbyVision", "matchContentEnabled",
@@ -454,8 +457,9 @@ enum SessionOptionCorrection {
         "preserveASSMarkup", "prepareNativeSubtitles", "eagerNativeSubtitleReaders", "serveIFramePlaylist", "confirmAtmos",
         "nativeSubtitlePreferredLanguages", "sequentialOrigin", "maxConcurrentSourceRequests", "heldSourceConnection",
         "declaredDurationSeconds", "probesize", "maxAnalyzeDuration", "preferredAudioLanguages",
-        "preferredSubtitleLanguages", "externalSubtitles", "forwardBufferSegments", "progressiveSegmentDelivery", "autoplay",
-        "audioDelaySeconds", "teletextPage", "deinterlaceMode", "deinterlaceFieldRate", "preferredDecodePath",
+        "preferredSubtitleLanguages", "externalSubtitles", "forwardBufferSegments", "progressiveSegmentDelivery",
+        "subtitleForwardPrefetch", "vodSegmentTargetSeconds", "autoplay",
+        "audioDelaySeconds", "audioEffects", "teletextPage", "deinterlaceMode", "deinterlaceFieldRate", "preferredDecodePath",
         "escalatesToSoftwarePath", "sharedOutputRole", "isLiveRejoin", "subtitleSessionCarryover",
     ]
 }

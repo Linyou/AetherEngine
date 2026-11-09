@@ -243,6 +243,15 @@ final class AudioBridge: @unchecked Sendable {
 
     private static let avNoPTS: Int64 = -0x7FFFFFFFFFFFFFFF - 1
 
+    /// Reel patch P-006: the effects this session asked for, run on each encoder-sized frame between
+    /// the FIFO and the encoder. Nil when every effect is off, which leaves the bridge exactly as it
+    /// was. Fixed for the bridge's life: a change re-cuts the session (the segments AVPlayer already
+    /// holds were encoded with the old value), so there is no live setter to race the pump.
+    private var effectsProcessor: AudioEffectsProcessor?
+    /// Float view of an integer frame (the FLAC formats), grown to the largest frame seen and kept.
+    private var effectsScratch: UnsafeMutablePointer<Float>?
+    private var effectsScratchCapacity = 0
+
     // MARK: - Lifecycle
 
     /// Opens source decoder + bridge encoder (eagerly, so encoderCodecpar is ready for muxer init). The encoder
@@ -261,7 +270,8 @@ final class AudioBridge: @unchecked Sendable {
         srcCodecpar: UnsafeMutablePointer<AVCodecParameters>,
         srcTimeBase: AVRational,
         mode: Mode = .surroundCompat,
-        forcedEncoder: AVCodecID? = nil
+        forcedEncoder: AVCodecID? = nil,
+        audioEffects: AudioEffects = .off
     ) throws {
         self.srcTimeBase = srcTimeBase
         self.mode = mode
@@ -489,6 +499,14 @@ final class AudioBridge: @unchecked Sendable {
             throw AudioBridgeError.encoderAllocFailed
         }
         fifo = fifoPtr
+
+        // 7. P-006: effects on the encoder's own rate and channel order, which is what the FIFO holds.
+        if audioEffects.isActive {
+            effectsProcessor = AudioEffectsProcessor(
+                effects: audioEffects, sampleRate: Int(sampleRate),
+                roles: AudioEffectsProcessor.ChannelRoles(layout: &enc.pointee.ch_layout))
+            EngineLog.emit("[AudioBridge] audio effects: \(audioEffects)", category: .session)
+        }
     }
 
     deinit {
@@ -705,6 +723,7 @@ final class AudioBridge: @unchecked Sendable {
         if let swr = swrCtx {
             _ = swr_init(swr)
         }
+        effectsProcessor?.reset()
         rebaseFromNextSourcePTS = true
     }
 
@@ -843,6 +862,9 @@ final class AudioBridge: @unchecked Sendable {
             av_audio_fifo_free(f)
             fifo = nil
         }
+        effectsScratch?.deallocate()
+        effectsScratch = nil
+        effectsScratchCapacity = 0
     }
 
     // MARK: - Feed
@@ -1215,6 +1237,9 @@ final class AudioBridge: @unchecked Sendable {
             }
             if readSamples <= 0 { break }
             of.pointee.nb_samples = readSamples
+            if effectsProcessor != nil {
+                applyEffects(to: of, frameCount: Int(readSamples), channels: Int(nChannels))
+            }
             of.pointee.pts = nextEncoderPTS
             nextEncoderPTS += Int64(readSamples)
 
@@ -1247,5 +1272,55 @@ final class AudioBridge: @unchecked Sendable {
             }
         }
     }
-}
 
+    /// P-006: run the effects over one frame on its way to the encoder, in whichever of the three
+    /// intermediate formats this bridge opened. E-AC-3's FLTP planes are processed where they are;
+    /// FLAC's integer PCM goes through a Float view and back, scaled to the same full scale
+    /// (`bits_per_raw_sample` 24 is carried in the top bits of S32, so 2^31 is full scale there too).
+    /// The limiter keeps the result under full scale, so the way back cannot wrap. Caller holds `opLock`.
+    private func applyEffects(to frame: UnsafeMutablePointer<AVFrame>, frameCount: Int, channels: Int) {
+        guard frameCount > 0, channels > 0, effectsProcessor?.roles.channelCount == channels else { return }
+        switch pcmSampleFmt {
+        case AV_SAMPLE_FMT_FLTP:
+            guard let data = frame.pointee.extended_data else { return }
+            var planes: [UnsafeMutablePointer<Float>] = []
+            planes.reserveCapacity(channels)
+            for channel in 0..<channels {
+                guard let plane = data[channel] else { return }
+                planes.append(UnsafeMutableRawPointer(plane).assumingMemoryBound(to: Float.self))
+            }
+            effectsProcessor?.process(planes: planes, frameCount: frameCount)
+        case AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_S32:
+            guard let raw = frame.pointee.data.0 else { return }
+            let count = frameCount * channels
+            let scratch = effectsScratchBuffer(capacity: count)
+            if pcmSampleFmt == AV_SAMPLE_FMT_S16 {
+                let pcm = UnsafeMutableRawPointer(raw).assumingMemoryBound(to: Int16.self)
+                for i in 0..<count { scratch[i] = Float(pcm[i]) / 32_768 }
+                effectsProcessor?.process(interleaved: scratch, frameCount: frameCount)
+                for i in 0..<count {
+                    pcm[i] = Int16(max(-32_768, min(32_767, (scratch[i] * 32_768).rounded())))
+                }
+            } else {
+                let pcm = UnsafeMutableRawPointer(raw).assumingMemoryBound(to: Int32.self)
+                for i in 0..<count { scratch[i] = Float(Double(pcm[i]) / 2_147_483_648) }
+                effectsProcessor?.process(interleaved: scratch, frameCount: frameCount)
+                for i in 0..<count {
+                    let scaled = (Double(scratch[i]) * 2_147_483_648).rounded()
+                    pcm[i] = Int32(max(-2_147_483_648, min(2_147_483_647, scaled)))
+                }
+            }
+        default:
+            return
+        }
+    }
+
+    private func effectsScratchBuffer(capacity: Int) -> UnsafeMutablePointer<Float> {
+        if let scratch = effectsScratch, effectsScratchCapacity >= capacity { return scratch }
+        effectsScratch?.deallocate()
+        let scratch = UnsafeMutablePointer<Float>.allocate(capacity: capacity)
+        effectsScratch = scratch
+        effectsScratchCapacity = capacity
+        return scratch
+    }
+}

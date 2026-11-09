@@ -19,18 +19,20 @@ enum FrameRateSnap {
 
     /// Snap `raw` to the nearest member of `standard` within ±0.5 fps,
     /// or `nil` if it falls outside that tolerance from every standard
-    /// rate. Special case: 23.976 wins the [23.5, 24.05] window over
-    /// 24.0 because film-cadence sources commonly probe to 23.976 and
+    /// rate. Special case: in the [23.5, 24.05] window, a source that
+    /// probes at 24.000 (true 24/1 film) gets 24 and everything else gets
+    /// 23.976, because film-cadence sources commonly probe to 23.976 and
     /// 23.976 ↔ 24 matters for 3:2 pulldown / judder visibility.
     static func snap(_ raw: Double) -> Double? {
         guard raw > 0, raw.isFinite else { return nil }
 
-        // Film-cadence shortcut. 24.000-fps probes land here too;
-        // sending 23.976 to the panel for them is the conservative
-        // choice (panels that support 24 also support 23.976; the
-        // reverse isn't guaranteed).
+        // Film-cadence shortcut. Reel patch P-002: a true 24 fps source
+        // (24/1, which probes at 24.000) gets 24 Hz; sending it 23.976
+        // repeats a frame about every 42 s. HDMI carries 24 and 23.976
+        // as the same timing at two pixel clocks, so a panel that takes
+        // one takes the other.
         if raw >= 23.5 && raw <= 24.05 {
-            return 23.976
+            return abs(raw - 24.0) < 0.006 ? 24.0 : 23.976
         }
 
         var best: (rate: Double, delta: Double)?

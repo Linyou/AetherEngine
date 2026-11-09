@@ -889,13 +889,16 @@ extension AetherEngine {
             // the host asked for; without it the flag lasts exactly as long as the pre-opened demuxer.
             heldSourceConnection: loadedOptions.heldSourceConnection,
             declaredDurationSeconds: loadedOptions.declaredDurationSeconds,
-            forwardBufferSegments: loadedOptions.forwardBufferSegments
+            forwardBufferSegments: loadedOptions.forwardBufferSegments,
+            vodSegmentTargetSeconds: loadedOptions.vodSegmentTargetSeconds
         )
         // AE#792: the session's live header store, shared with the playback demuxer it was handed, so
         // `updateRequestHeaders(_:)` reaches that reader and every reopen the producer makes. Set before start().
         session.requestHeaders = sessionRequestHeaders
         // AE#464: every producer this session builds reads it off the session. Set before start().
         session.audioDelaySeconds = loadedOptions.audioDelaySeconds
+        // P-006: decides stream copy vs bridge in start(), so it has to be there before it.
+        session.audioEffects = loadedOptions.audioEffects
         session.servesSegmentsProgressively = loadedOptions.progressiveSegmentDelivery
         // #240: the pump claims the source link through this gate while it is fetching, so the
         // subtitle side readers can stay out of its way. Set before start().
@@ -2017,6 +2020,7 @@ extension AetherEngine {
         host.preferDualLayerDolbyVision = loadedOptions.preferDualLayerDolbyVision
         host.elType = elType ?? sourceElType
         host.setAudioDelay(loadedOptions.audioDelaySeconds)   // AE#464: before the decoder opens
+        host.setAudioEffects(loadedOptions.audioEffects)      // P-006: likewise
         host.deinterlaceConfig = DeinterlaceConfig(
             mode: loadedOptions.deinterlaceMode,
             fieldRate: loadedOptions.deinterlaceFieldRate
@@ -2184,6 +2188,7 @@ extension AetherEngine {
         await activateRendererAudioSession(audioSourceStreamIndex: audioSourceStreamIndex)
         try checkLoadCurrent(generation)
         let host = AudioPlaybackHost()
+        host.setAudioEffects(loadedOptions.audioEffects)   // P-006: before the decoder opens
         self.audioHost = host
         applyDesiredVolume(to: host)
         applyDesiredRate(to: host)

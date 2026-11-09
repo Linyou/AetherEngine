@@ -328,12 +328,12 @@ extension HLSVideoEngine {
     static func buildKeyframeSegmentPlan(
         keyframes: [Int64],
         videoTimeBase: AVRational,
-        sourceDurationSeconds: Double
+        sourceDurationSeconds: Double,
+        target: Double = HLSVideoEngine.targetSegmentDuration
     ) -> [Segment] {
         guard keyframes.count >= 2 else { return [] }
         let tb = Double(videoTimeBase.num) / Double(videoTimeBase.den)
         guard tb > 0 else { return [] }
-        let target = Self.targetSegmentDuration
 
         let sorted = keyframes.sorted()
         let startPts0 = sorted[0]

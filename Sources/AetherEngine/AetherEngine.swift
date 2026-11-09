@@ -2286,6 +2286,10 @@ public final class AetherEngine: ObservableObject {
     /// would be lost at the next audio-track switch or background return.
     func setLoadedAudioDelay(_ seconds: Double) { loadedOptions.audioDelaySeconds = seconds }
 
+    /// Reel patch P-006: the audio effects, written where every rebuild replays them from, for the
+    /// same reason as the audio delay above. See `setAudioEffects(_:)`.
+    func setLoadedAudioEffects(_ effects: AudioEffects) { loadedOptions.audioEffects = effects }
+
     /// AE#464 round 2: the fourth narrow write, and the one that makes a session-preserving reload
     /// preserve the session's transport. `autoplay` describes a MOUNT, and a rebuild is not a mount;
     /// writing the session's own transport state here is what both reload branches then replay,
@@ -3653,6 +3657,9 @@ public final class AetherEngine: ObservableObject {
     /// the rebuild already in flight delivers the newest one. See `reanchorForAudioDelay`.
     var audioDelayReanchorInFlight = false
 
+    /// Reel patch P-006: the same fold for `setAudioEffects`, so a burst of toggles costs one re-anchor.
+    var audioEffectsReanchorInFlight = false
+
     /// The playhead a rebuild of this session has to come back to (#464 round 2).
     var positionForSessionRebuild: Double {
         let pending = !isLive && nativeHost != nil
@@ -4810,7 +4817,9 @@ public final class AetherEngine: ObservableObject {
                 && (probe.stream(at: resolvedInitialAudio).map {
                     FLACStreamInfo.coreMediaRejectsSource(UnsafePointer($0.pointee.codecpar))
                 } ?? false)
+            // P-006: AVPlayer decodes where the engine never sees a sample, so audio effects take FFmpeg.
             let useNativeAudio = !isCustomSource && Self.avPlayerCanDecodeAudio(audioCodecID) && !flacBlocksTooSmall
+                && !options.audioEffects.isActive
             EngineLog.emit("[AetherEngine] audio dispatch: codec=\(audioCodecID.rawValue) -> \(useNativeAudio ? "AVPlayer" : "FFmpeg")\(flacBlocksTooSmall ? " (FLAC min_blocksize below CoreMedia's floor)" : "")", category: .engine)
             // A preserved video NativeAVPlayerHost from a native->native reload must be released before an audio
             // session; otherwise the old AVPlayer stays alive in currentAVPlayer and the volume setter writes into it.

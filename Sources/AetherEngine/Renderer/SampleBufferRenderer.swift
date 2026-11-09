@@ -665,6 +665,21 @@ final class SampleBufferRenderer: @unchecked Sendable {
         return _lastEnqueuedFrame
     }
 
+    /// Reel patch P-007: the presentation times (source axis) handed to the layer since the last
+    /// flush, which is what a stopped clock can be moved onto to show exactly one more frame. Bounded:
+    /// trimmed to the newest `handedOverTimesKept` whenever it reaches twice that, so the decode
+    /// thread never pays more than an occasional move. Guarded by `reorderLock`.
+    private var _handedOverTimes: [Double] = []
+    private static let handedOverTimesKept = 512
+
+    /// P-007: what `_handedOverTimes` holds, ascending.
+    func handedOverPresentationTimes() -> [Double] {
+        reorderLock.lock()
+        let times = _handedOverTimes
+        reorderLock.unlock()
+        return times.sorted()
+    }
+
     /// Discard all buffered frames. `removingDisplayedImage: true` (stop/teardown) also clears the visible
     /// frame; `false` (seek) holds the last frame on screen until the post-seek frame is enqueued, so a seek
     /// doesn't flash black between the old and new positions (matches the hardware path's hold-last-frame).
@@ -672,6 +687,7 @@ final class SampleBufferRenderer: @unchecked Sendable {
         reorderLock.lock()
         reorderBuffer.removeAll()
         _lastEnqueuedFrame = nil
+        _handedOverTimes.removeAll(keepingCapacity: true)   // P-007: those frames are gone
         // #407: the next frame handed over will not follow the last one, so the gap between them is
         // not a cadence measurement. Left standing, every seek would report one enormous interval.
         _lastHandedPtsSeconds = nil
@@ -767,6 +783,10 @@ final class SampleBufferRenderer: @unchecked Sendable {
         target.enqueue(sampleBuffer)
         reorderLock.lock()
         _lastEnqueuedFrame = pixelBuffer
+        _handedOverTimes.append(CMTimeGetSeconds(pts))
+        if _handedOverTimes.count >= 2 * Self.handedOverTimesKept {
+            _handedOverTimes.removeFirst(_handedOverTimes.count - Self.handedOverTimesKept)
+        }
         reorderLock.unlock()
 
         // #311: reported here rather than at admission, so it describes frames the compositor has

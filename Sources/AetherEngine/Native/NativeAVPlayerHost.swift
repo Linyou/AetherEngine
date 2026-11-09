@@ -2035,6 +2035,42 @@ final class NativeAVPlayerHost {
         }
     }
 
+    /// Reel patch P-007: step the item `count` frames (negative steps back) with AVPlayer's own
+    /// `step(byCount:)`, and publish where it landed. False when the item cannot step that way, a
+    /// seek owns the clock, or the step did not move within the deadline, so the caller can fall
+    /// back to a seek.
+    ///
+    /// The landing is published here rather than left to the periodic observer: a step moves the
+    /// clock of a paused item, and the observer's next callback is not guaranteed before the next
+    /// press reads `currentTime`.
+    func stepFrames(by count: Int) async -> Bool {
+        guard count != 0, !seekInFlight, !mountSeekPending,
+              let item = avPlayer.currentItem, item.status == .readyToPlay,
+              count > 0 ? item.canStepForward : item.canStepBackward else { return false }
+        let before = item.currentTime()
+        item.step(byCount: count)
+        // The step completes asynchronously: currentTime moves once the frame is decoded.
+        let deadline = ContinuousClock.now + .seconds(1)
+        while CMTimeCompare(item.currentTime(), before) == 0, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        let landed = item.currentTime()
+        guard avPlayer.currentItem === item, CMTimeCompare(landed, before) != 0,
+              landed.seconds.isFinite else {
+            EngineLog.emit("[NativeAVPlayerHost] P-007 step(byCount: \(count)) did not move the item within 1 s",
+                           category: .engine)
+            return false
+        }
+        currentTime = landed.seconds
+        renderedTime = landed.seconds
+        EngineLog.emit(
+            "[NativeAVPlayerHost] P-007 stepped \(count) frame(s): \(String(format: "%.4f", before.seconds)) -> "
+            + "\(String(format: "%.4f", landed.seconds))",
+            category: .engine
+        )
+        return true
+    }
+
     /// A callback can report an interrupted seek or a clamp to the old position. Neither is a
     /// landing. Allow sub-second clock rounding, but never accept an unrelated playhead merely
     /// because the requested destination is behind it.

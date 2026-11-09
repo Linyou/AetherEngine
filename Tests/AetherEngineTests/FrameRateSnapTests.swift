@@ -15,13 +15,14 @@ struct FrameRateSnapTests {
         #expect(FrameRateSnap.snap(48) == 48)
     }
 
-    @Test("Film cadence shortcut: 23.5...24.05 → 23.976")
+    @Test("Film cadence: 24.000 → 24, the rest of 23.5...24.05 → 23.976")
     func filmCadencePrefers23976() {
-        // Film-cadence shortcut beats the 24.0 nearest-match because
-        // panels that support 24 also support 23.976; reverse isn't
-        // guaranteed.
+        // Reel P-002: a true 24 fps source keeps 24 Hz; every other
+        // film-cadence probe is 24000/1001.
         #expect(FrameRateSnap.snap(23.976) == 23.976)
-        #expect(FrameRateSnap.snap(24.000) == 23.976)
+        #expect(FrameRateSnap.snap(24.000) == 24)
+        #expect(FrameRateSnap.snap(24.004) == 24)
+        #expect(FrameRateSnap.snap(23.99) == 23.976)
         #expect(FrameRateSnap.snap(23.97) == 23.976)
         #expect(FrameRateSnap.snap(23.98) == 23.976)
         #expect(FrameRateSnap.snap(23.5) == 23.976)
